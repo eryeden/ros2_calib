@@ -862,6 +862,7 @@ class MainWindow(QMainWindow):
         for i in range(self.stacked_widget.count()):
             widget = self.stacked_widget.widget(i)
             if hasattr(widget, "calibration_completed"):  # CalibrationWidget has this signal
+                widget.setEnabled(True)  # Re-enable widget if previously disabled
                 self.stacked_widget.setCurrentIndex(i)
                 print(f"[DEBUG] Switched back to calibration view at index {i}")
                 return
@@ -1247,6 +1248,10 @@ class MainWindow(QMainWindow):
     def show_calibration_results(self, calibrated_transform):
         """Show calibration results and TF integration options."""
         self.calibrated_transform = calibrated_transform
+
+        # Disable calibration widget to prevent it from intercepting events
+        if hasattr(self, "calibration_widget") and self.calibration_widget:
+            self.calibration_widget.setEnabled(False)
 
         # Switch to results view (index 3 after frame selection was added)
         results_index = self.get_results_view_index()
