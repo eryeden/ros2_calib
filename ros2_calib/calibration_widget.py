@@ -22,6 +22,7 @@
 
 from functools import partial
 
+import apriltag
 import cv2
 import matplotlib.cm as cm
 import numpy as np
@@ -117,6 +118,9 @@ class CalibrationWidget(QWidget):
         self.camerainfo_msg = camerainfo_msg
         self.ros_utils = ros_utils
         self.correspondences = {}
+        self.auto_corr_keys = []
+        self.apriltag_detector = apriltag.Detector()
+        self.cv_image = None
 
         self.initial_extrinsics = initial_transform
         self.extrinsics = np.copy(self.initial_extrinsics)
@@ -167,7 +171,18 @@ class CalibrationWidget(QWidget):
         view_controls_layout.addRow("Point Size:", self.point_size_spinbox)
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems(
-            ["autumn", "jet", "winter", "summer", "spring", "hot", "magma", "inferno", "Spectral", "RdYlGn"]
+            [
+                "autumn",
+                "jet",
+                "winter",
+                "summer",
+                "spring",
+                "hot",
+                "magma",
+                "inferno",
+                "Spectral",
+                "RdYlGn",
+            ]
         )
         self.colormap_combo.setCurrentText(AppConstants.DEFAULT_COLORMAP)
         view_controls_layout.addRow("Colormap:", self.colormap_combo)
@@ -198,6 +213,9 @@ class CalibrationWidget(QWidget):
         # Correspondence Controls Section
         corr_group = QGroupBox("Correspondence Management")
         corr_layout = QVBoxLayout(corr_group)
+        self.detect_apriltag_button = QPushButton("Detect AprilTags")
+        self.detect_apriltag_button.clicked.connect(self.detect_apriltags)
+        corr_layout.addWidget(self.detect_apriltag_button)
         self.add_corr_button = QPushButton("Add Correspondence")
         self.add_corr_button.setCheckable(True)
         self.add_corr_button.toggled.connect(self.toggle_selection_mode)
@@ -356,7 +374,7 @@ class CalibrationWidget(QWidget):
         cleaner = LiDARCleaner(K, extrinsics_3x4, self.points_xyz.T, h, w)
         self.occlusion_mask = cleaner.run()
 
-        num_removed = np.sum(self.occlusion_mask == False)
+        num_removed = np.sum(~self.occlusion_mask)
         print(f"Occlusion cleaning finished. {num_removed} points identified as occluded.")
 
         self.progress_bar.setVisible(False)
@@ -379,7 +397,6 @@ class CalibrationWidget(QWidget):
         if colorization_mode == "Distance":
             # Calculate distances for all valid points
             if hasattr(self, "valid_indices") and len(self.valid_indices) > 0:
-                K = np.array(self.camerainfo_msg.k).reshape(3, 3)
                 rvec, _ = cv2.Rodrigues(self.extrinsics[:3, :3])
                 tvec = self.extrinsics[:3, 3]
                 points_cam = (self.extrinsics[:3, :3] @ self.points_xyz.T).T + tvec
@@ -402,7 +419,8 @@ class CalibrationWidget(QWidget):
         self.step_size_ok_button.setStyleSheet(self.default_button_style)
 
     def _update_calibrate_button_highlight(self):
-        if len(self.correspondences) >= 4:
+        valid_corr = [c for c in self.correspondences.values() if c["3d_mean"] is not None]
+        if len(valid_corr) >= AppConstants.MIN_CORRESPONDENCES:
             self.calibrate_button.setStyleSheet(UIStyles.HIGHLIGHT_BUTTON)
         else:
             self.calibrate_button.setStyleSheet(self.default_button_style)
@@ -522,10 +540,12 @@ class CalibrationWidget(QWidget):
         selected_valid_indices = [item.data(0) for item in self.current_3d_selection]
         original_indices = [self.valid_indices[i] for i in selected_valid_indices]
         mean_3d_point = np.mean(self.points_xyz[original_indices], axis=0)
-        self.correspondences[self.selected_2d_point] = {
+        existing = self.correspondences.get(self.selected_2d_point, {})
+        existing.update({
             "3d_mean": mean_3d_point,
             "3d_points_indices": original_indices,
-        }
+        })
+        self.correspondences[self.selected_2d_point] = existing
         self.update_corr_list()
         self.reset_selection_mode()
         self._update_calibrate_button_highlight()
@@ -533,6 +553,7 @@ class CalibrationWidget(QWidget):
 
     def reset_calibration_state(self):
         self.correspondences = {}
+        self.auto_corr_keys = []
         self.update_corr_list()
         self.extrinsics = np.copy(self.initial_extrinsics)
         self.occlusion_mask = None
@@ -573,6 +594,31 @@ class CalibrationWidget(QWidget):
         self.image_res_label.setText(f"{w} x {h}")
         q_image = QImage(self.cv_image.data, w, h, 3 * w, QImage.Format_RGB888)
         self.scene.addPixmap(QPixmap.fromImage(q_image))
+
+    def detect_apriltags(self):
+        if self.cv_image is None:
+            return
+        gray = cv2.cvtColor(self.cv_image, cv2.COLOR_RGB2GRAY)
+        detections = self.apriltag_detector.detect(gray)
+        for key in self.auto_corr_keys:
+            self.correspondences.pop(key, None)
+        self.auto_corr_keys = []
+        self.clear_temp_markers()
+        for det in detections:
+            corners = det.corners
+            tag_id = int(det.tag_id)
+            for idx, (x, y) in enumerate(corners):
+                p2d = (float(x), float(y))
+                self.correspondences[p2d] = {
+                    "3d_mean": None,
+                    "3d_points_indices": [],
+                    "tag_id": tag_id,
+                    "corner_idx": idx,
+                }
+                self.auto_corr_keys.append(p2d)
+                self.draw_cross_marker(QPointF(x, y), QColor(Colors.CORRESPONDENCE_2D))
+        self.update_corr_list()
+        self._update_calibrate_button_highlight()
 
     def display_camera_intrinsics(self):
         """Display the camera intrinsic matrix K."""
@@ -681,9 +727,16 @@ class CalibrationWidget(QWidget):
         self.corr_list_widget.clear()
         for p2d, corr_data in self.correspondences.items():
             p3d = corr_data["3d_mean"]
-            item_text = (
-                f"({p2d[0]:.1f}, {p2d[1]:.1f}) -> ({p3d[0]:.2f}, {p3d[1]:.2f}, {p3d[2]:.2f})"
-            )
+            if p3d is None:
+                p3d_text = "N/A"
+            else:
+                p3d_text = f"({p3d[0]:.2f}, {p3d[1]:.2f}, {p3d[2]:.2f})"
+            tag_info = ""
+            if "tag_id" in corr_data:
+                tag = corr_data["tag_id"]
+                corner = corr_data.get("corner_idx", 0)
+                tag_info = f"Tag {tag} c{corner}: "
+            item_text = f"{tag_info}({p2d[0]:.1f}, {p2d[1]:.1f}) -> {p3d_text}"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, p2d)
             self.corr_list_widget.addItem(item)
@@ -694,6 +747,8 @@ class CalibrationWidget(QWidget):
             p2d_key = current_item.data(Qt.UserRole)
             if p2d_key in self.correspondences:
                 del self.correspondences[p2d_key]
+            if p2d_key in self.auto_corr_keys:
+                self.auto_corr_keys.remove(p2d_key)
             self.update_corr_list()
             self.clear_all_highlighting()
             self._update_calibrate_button_highlight()
@@ -756,7 +811,12 @@ class CalibrationWidget(QWidget):
         self.selected_3d_items_map = {}
 
     def run_calibration(self):
-        if len(self.correspondences) < AppConstants.MIN_CORRESPONDENCES:
+        calib_corr = [
+            (p2d, corr["3d_mean"])
+            for p2d, corr in self.correspondences.items()
+            if corr["3d_mean"] is not None
+        ]
+        if len(calib_corr) < AppConstants.MIN_CORRESPONDENCES:
             return
         self.progress_bar.setVisible(True)
         QApplication.processEvents()
@@ -765,7 +825,6 @@ class CalibrationWidget(QWidget):
             ransac_method_str
         )
         lsq_method = self.lsq_method_combo.currentText()
-        calib_corr = [(p2d, corr["3d_mean"]) for p2d, corr in self.correspondences.items()]
         K = np.array(self.camerainfo_msg.k).reshape(3, 3)
         self.extrinsics = calibration.calibrate(calib_corr, K, pnp_flag, lsq_method)
         self.progress_bar.setVisible(False)
@@ -788,7 +847,11 @@ class CalibrationWidget(QWidget):
                 f.write("# LiDAR-Camera Extrinsic Calibration (T_camera_lidar)\n")
                 f.write(f"translation:\n  x: {t[0]:.8f}\n  y: {t[1]:.8f}\n  z: {t[2]:.8f}\n")
                 f.write(
-                    f"rotation:\n  x: {q[0]:.8f}\n  y: {q[1]:.8f}\n  z: {q[2]:.8f}\n  w: {q[3]:.8f}\n"
+                    "rotation:\n"
+                    f"  x: {q[0]:.8f}\n"
+                    f"  y: {q[1]:.8f}\n"
+                    f"  z: {q[2]:.8f}\n"
+                    f"  w: {q[3]:.8f}\n"
                 )
             print(f"Calibration saved to {file_path}")
 

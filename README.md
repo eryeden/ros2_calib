@@ -40,7 +40,8 @@
 ## Features
 
 - **🎯 Interactive Calibration**: Point-and-click interface for 2D-3D correspondences
-- **🔄 Real-time Visualization**: Live point cloud projection with adjustable parameters  
+- **🏷️ AprilTag Detection**: Automatically extracts image features for correspondences
+- **🔄 Real-time Visualization**: Live point cloud projection with adjustable parameters
 - **🧠 Smart Algorithms**: RANSAC-based PnP solver with Scipy least-squares refinement
 - **🌳 TF Tree Integration**: Visual transform chain management and URDF export
 - **🧹 Point Cloud Cleaning**: Advanced occlusion removal using the RePLAy algorithm

@@ -27,6 +27,7 @@ dependencies = [
     "numpy",
     "PySide6",
     "opencv-python-headless",
+    "apriltag",
     "scipy",
     "NodeGraphQt",
     "transforms3d",
