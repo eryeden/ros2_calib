@@ -405,27 +405,10 @@ class MainWindow(QMainWindow):
             self.load_bag_from_path(file_path)
 
     def find_yaml_file(self, mcap_path):
-        """Find the corresponding YAML file for an MCAP file.
+        """Deprecated: YAML is no longer required. Kept for backward compatibility.
 
-        Looks for either:
-        1. metadata.yaml in the same directory
-        2. A YAML file with the same base name as the MCAP file
-
-        Returns the path to the YAML file if found, None otherwise.
+        Always returns None and no longer blocks loading when YAML is absent.
         """
-        directory = os.path.dirname(mcap_path)
-        mcap_basename = os.path.basename(mcap_path).replace(".mcap", "")
-
-        # Check for metadata.yaml first
-        metadata_yaml = os.path.join(directory, "metadata.yaml")
-        if os.path.exists(metadata_yaml):
-            return metadata_yaml
-
-        # Check for matching filename yaml
-        matching_yaml = os.path.join(directory, f"{mcap_basename}.yaml")
-        if os.path.exists(matching_yaml):
-            return matching_yaml
-
         return None
 
     def process_dropped_path(self, path):
@@ -433,19 +416,8 @@ class MainWindow(QMainWindow):
         if os.path.isfile(path):
             # Direct .mcap file dropped
             if path.endswith(".mcap"):
-                # Check if corresponding .yaml file exists
-                yaml_path = self.find_yaml_file(path)
-                if yaml_path:
-                    self.load_bag_from_path(path)
-                else:
-                    directory = os.path.dirname(path)
-                    mcap_basename = os.path.basename(path).replace(".mcap", "")
-                    self.bag_path_label.setText(
-                        f"Error: No YAML file found! Expected 'metadata.yaml' or '{mcap_basename}.yaml' in {os.path.basename(directory)}/"
-                    )
-                    self.bag_path_label.setStyleSheet(
-                        "padding: 5px; border: 1px solid red; color: red;"
-                    )
+                # YAML is optional; proceed to load MCAP directly
+                self.load_bag_from_path(path)
             else:
                 self.bag_path_label.setText("Error: Only .mcap files are supported!")
                 self.bag_path_label.setStyleSheet(
@@ -456,17 +428,8 @@ class MainWindow(QMainWindow):
             mcap_files = [f for f in os.listdir(path) if f.endswith(".mcap")]
             if len(mcap_files) == 1:
                 mcap_path = os.path.join(path, mcap_files[0])
-                yaml_path = self.find_yaml_file(mcap_path)
-                if yaml_path:
-                    self.load_bag_from_path(mcap_path)
-                else:
-                    mcap_basename = mcap_files[0].replace(".mcap", "")
-                    self.bag_path_label.setText(
-                        f"Error: No YAML file found! Expected 'metadata.yaml' or '{mcap_basename}.yaml' in folder!"
-                    )
-                    self.bag_path_label.setStyleSheet(
-                        "padding: 5px; border: 1px solid red; color: red;"
-                    )
+                # YAML is optional; proceed to load MCAP directly
+                self.load_bag_from_path(mcap_path)
             elif len(mcap_files) == 0:
                 self.bag_path_label.setText("Error: No .mcap file found in folder!")
                 self.bag_path_label.setStyleSheet(
@@ -794,6 +757,14 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat(f"Error: {error_message}")
         self.progress_bar.setVisible(True)  # Keep visible to show error
         self.proceed_button.setEnabled(True)
+
+        # Also show a message box to make the error visible immediately
+        try:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(self, "Failed to read rosbag", str(error_message))
+        except Exception:
+            pass
 
         # Clean up worker
         if hasattr(self, "processing_worker") and self.processing_worker:

@@ -24,6 +24,7 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "rosbags",
+    "mcap>=0.9",
     "numpy",
     "PySide6",
     "opencv-python-headless",

@@ -21,10 +21,30 @@
 # SOFTWARE.
 
 from pathlib import Path
+import logging
 
 from PySide6.QtCore import QThread, Signal
 from rosbags.highlevel import AnyReader
 from rosbags.typesys import Stores, get_typestore
+def _ensure_mcap_for_file(bag_path: Path):
+    """Ensure the optional 'mcap' dependency is available for .mcap files.
+
+    Rosbags requires the 'mcap' package to read raw MCAP files directly. If it is
+    not installed, rosbags may try to interpret the binary as text (YAML), causing
+    UnicodeDecodeError like 'utf-8' codec can't decode byte 0x89...
+    """
+    if bag_path.suffix == ".mcap":
+        try:
+            import importlib.util
+
+            spec = importlib.util.find_spec("mcap")
+        except Exception:
+            spec = None
+        if spec is None:
+            raise RuntimeError(
+                "MCAP support is missing. Please install the 'mcap' package in your environment: "
+                "pip install mcap"
+            )
 
 
 def get_topic_info(bag_file):
@@ -35,9 +55,27 @@ def get_topic_info(bag_file):
     topics = []
     typestore = get_typestore(Stores.ROS2_JAZZY)  # Or another appropriate ROS2 version
     bag_path = Path(bag_file)
-    with AnyReader([bag_path.parent], default_typestore=typestore) as reader:
-        for connection in reader.connections:
-            topics.append((connection.topic, connection.msgtype, connection.msgcount))
+    logger = logging.getLogger("ros2_calib")
+    # Try file path first for .mcap; fallback to parent directory
+    candidates = []
+    if bag_path.suffix == ".mcap":
+        _ensure_mcap_for_file(bag_path)
+        candidates = [[bag_path], [bag_path.parent]]
+    else:
+        candidates = [[bag_path.parent]]
+    last_err = None
+    for reader_paths in candidates:
+        try:
+            with AnyReader(reader_paths, default_typestore=typestore) as reader:
+                for connection in reader.connections:
+                    topics.append((connection.topic, connection.msgtype, connection.msgcount))
+            if topics:
+                return topics
+        except Exception as e:
+            last_err = e
+            logger.warning("get_topic_info failed with %s, paths=%s", e, reader_paths)
+    if last_err:
+        raise last_err
     return topics
 
 
@@ -45,10 +83,26 @@ def get_total_message_count(bag_file):
     """Get total message count from bag file for progress tracking."""
     typestore = get_typestore(Stores.ROS2_JAZZY)
     bag_path = Path(bag_file)
+    logger = logging.getLogger("ros2_calib")
     total_count = 0
-    with AnyReader([bag_path.parent], default_typestore=typestore) as reader:
-        for connection in reader.connections:
-            total_count += connection.msgcount
+    candidates = []
+    if bag_path.suffix == ".mcap":
+        _ensure_mcap_for_file(bag_path)
+        candidates = [[bag_path], [bag_path.parent]]
+    else:
+        candidates = [[bag_path.parent]]
+    last_err = None
+    for reader_paths in candidates:
+        try:
+            with AnyReader(reader_paths, default_typestore=typestore) as reader:
+                for connection in reader.connections:
+                    total_count += connection.msgcount
+            return total_count
+        except Exception as e:
+            last_err = e
+            logger.warning("get_total_message_count failed with %s, paths=%s", e, reader_paths)
+    if last_err:
+        raise last_err
     return total_count
 
 
@@ -69,11 +123,27 @@ def read_messages(bag_file, topics_to_read):
 
     typestore = get_typestore(Stores.ROS2_JAZZY)
     bag_path = Path(bag_file)
-    with AnyReader([bag_path.parent], default_typestore=typestore) as reader:
-        for connection, timestamp, rawdata in reader.messages():
-            if connection.topic in topics_needed:
-                msg = reader.deserialize(rawdata, connection.msgtype)
-                yield timestamp, msg
+    logger = logging.getLogger("ros2_calib")
+    candidates = []
+    if bag_path.suffix == ".mcap":
+        _ensure_mcap_for_file(bag_path)
+        candidates = [[bag_path], [bag_path.parent]]
+    else:
+        candidates = [[bag_path.parent]]
+    last_err = None
+    for reader_paths in candidates:
+        try:
+            with AnyReader(reader_paths, default_typestore=typestore) as reader:
+                for connection, timestamp, rawdata in reader.messages():
+                    if connection.topic in topics_needed:
+                        msg = reader.deserialize(rawdata, connection.msgtype)
+                        yield timestamp, msg
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning("read_messages failed with %s, paths=%s", e, reader_paths)
+    if last_err:
+        raise last_err
 
 
 def read_single_messages(bag_file, topics_to_read):
@@ -90,14 +160,30 @@ def read_single_messages(bag_file, topics_to_read):
     topics_needed = set(topics_to_read.keys())
     typestore = get_typestore(Stores.ROS2_JAZZY)
     bag_path = Path(bag_file)
-    with AnyReader([bag_path.parent], default_typestore=typestore) as reader:
-        for connection, timestamp, rawdata in reader.messages():
-            if connection.topic in topics_needed:
-                msg = reader.deserialize(rawdata, connection.msgtype)
-                messages[connection.topic] = msg
-                topics_needed.remove(connection.topic)
-                if not topics_needed:
-                    break
+    logger = logging.getLogger("ros2_calib")
+    candidates = []
+    if bag_path.suffix == ".mcap":
+        _ensure_mcap_for_file(bag_path)
+        candidates = [[bag_path], [bag_path.parent]]
+    else:
+        candidates = [[bag_path.parent]]
+    last_err = None
+    for reader_paths in candidates:
+        try:
+            with AnyReader(reader_paths, default_typestore=typestore) as reader:
+                for connection, timestamp, rawdata in reader.messages():
+                    if connection.topic in topics_needed:
+                        msg = reader.deserialize(rawdata, connection.msgtype)
+                        messages[connection.topic] = msg
+                        topics_needed.remove(connection.topic)
+                        if not topics_needed:
+                            break
+            return messages
+        except Exception as e:
+            last_err = e
+            logger.warning("read_single_messages failed with %s, paths=%s", e, reader_paths)
+    if last_err:
+        raise last_err
     return messages
 
 
@@ -105,11 +191,26 @@ def iterate_all_messages(bag_file: str):
     """Generator to iterate through all messages in the rosbag efficiently."""
     typestore = get_typestore(Stores.ROS2_JAZZY)
     bag_path = Path(bag_file)
-
-    with AnyReader([bag_path.parent], default_typestore=typestore) as reader:
-        for connection, timestamp, rawdata in reader.messages():
-            msg = reader.deserialize(rawdata, connection.msgtype)
-            yield timestamp, connection.topic, msg
+    logger = logging.getLogger("ros2_calib")
+    candidates = []
+    if bag_path.suffix == ".mcap":
+        _ensure_mcap_for_file(bag_path)
+        candidates = [[bag_path], [bag_path.parent]]
+    else:
+        candidates = [[bag_path.parent]]
+    last_err = None
+    for reader_paths in candidates:
+        try:
+            with AnyReader(reader_paths, default_typestore=typestore) as reader:
+                for connection, timestamp, rawdata in reader.messages():
+                    msg = reader.deserialize(rawdata, connection.msgtype)
+                    yield timestamp, connection.topic, msg
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning("iterate_all_messages failed with %s, paths=%s", e, reader_paths)
+    if last_err:
+        raise last_err
 
 
 def combine_tf_static_messages(tf_messages):
